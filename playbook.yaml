@@ -1,0 +1,134 @@
+- name: Postavljanje Funkwhale aplikacije
+  hosts: localhost
+  become: true
+  vars:
+    funkwhale_api_ip: 127.0.0.1
+    funkwhale_api_port: 8000
+  tasks:
+    - name: Ažuriranje paketnog sustava
+      pacman:
+        update_cache: yes
+      become: true
+      when: ansible_os_family == "Archlinux"
+
+    - name: Instalacija paketa na Archlinux
+      pacman:
+        name: "{{ item }}"
+        state: latest
+      become: true
+      when: ansible_os_family == "Archlinux"
+      loop:
+        - python
+        - python-pip
+        - nginx
+        - postgresql
+        - redis
+        - ffmpeg
+        - git
+
+    - name: Instalacija setuptools biblioteke
+      pacman:
+        name: python-setuptools
+        state: present
+      become: true
+
+    - name: Instalacija psycopg2 biblioteke
+      pacman:
+        name: python-psycopg2
+        state: present
+      become: true
+
+    - name: Konfiguracija baze podataka
+      become_user: postgres
+      become: true
+      postgresql_db:
+        name: funkwhale
+        state: present
+
+    
+    - name: Postavljanje Funkwhale
+      become: true
+      git:
+        repo: "https://dev.funkwhale.audio/funkwhale/funkwhale.git"
+        dest: /opt/funkwhale
+        version: develop
+      notify: Restart Funkwhale
+
+    - name: Create Nginx sites-available directory
+      become: true
+      file:
+        path: /etc/nginx/sites-available
+        state: directory
+        mode: '0755'
+
+    - name: Konfiguracija web poslužitelja
+      become: true
+      copy:
+        src: /opt/funkwhale/deploy/nginx.template
+        dest: /etc/nginx/sites-available/funkwhale.conf
+
+    - name: Učitavanje sadržaja funkwhale.conf datoteke
+      slurp:
+        src: /etc/nginx/sites-available/funkwhale.conf
+      register: funkwhale_conf
+
+    - name: Zamjena vrijednosti hostnamea
+      set_fact:
+        modified_funkwhale_conf: "{{ funkwhale_conf.content | b64decode | replace('${FUNKWHALE_HOSTNAME}', 'localhost') | replace('server ${FUNKWHALE_API_IP}:${FUNKWHALE_API_PORT};', 'server ' + funkwhale_api_ip + ':' + funkwhale_api_port|string + ';') }}"
+
+    - name: Spremanje modificiranog funkwhale.conf
+      copy:
+        content: "{{ modified_funkwhale_conf }}"
+        dest: /etc/nginx/sites-available/funkwhale.conf
+
+
+
+    - name: Provjera postojanja direktorija sites-enabled
+      become: true
+      file:
+        path: /etc/nginx/sites-enabled
+        state: directory
+        mode: '0755'
+
+    - name: Aktiviranje web poslužitelja
+      become: true
+      file:
+        src: /etc/nginx/sites-available/funkwhale.conf
+        dest: /etc/nginx/sites-enabled/funkwhale.conf
+        state: link
+
+    - name: Ponovno učitavanje Nginx poslužitelja
+      become: true
+      systemd:
+        name: nginx
+        state: restarted
+
+ 
+
+    - name: Instalacija systemd usluge za Funkwhale
+      become: true
+      get_url:
+        url: "https://dev.funkwhale.audio/funkwhale/funkwhale/-/blob/develop/deploy/funkwhale.target"
+        dest: /etc/systemd/system/funkwhale.target
+        mode: 0644
+
+    - name: Ponovno učitavanje systemd servisa
+      become: true
+      systemd:
+        daemon_reload: yes
+
+    - name: Pokretanje funkwhale.target
+      become: yes
+      systemd:
+        name: funkwhale.target
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Restart Funkwhale
+      become: true
+      shell: |
+        cd /opt/funkwhale
+        funkwhale-manage configuration --generate
+        funkwhale-manage migrate
+        systemctl restart funkwhale.target
